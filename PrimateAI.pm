@@ -27,18 +27,35 @@ limitations under the License.
   mv PrimateAI.pm ~/.vep/Plugins
 
   ./vep -i variations.vcf --plugin PrimateAI,PrimateAI_scores_v0.2.tsv.gz
+  ./vep -i variations.vcf --plugin PrimateAI,PrimateAI_scores_v0.2_hg38.tsv.gz
 
 =head1 DESCRIPTION
- 
+
   A VEP plugin designed to retrieve clinical impact scores of variants, as described in https://www.nature.com/articles/s41588-018-0167-z.
+  Briefly, common missense mutations in non-human primate species are usually benign in humans, so can be eliminated from screens for pathogenic mutations.
+
+  Files containing predicted pathogenicity scores can be downloaded from https://basespace.illumina.com/s/yYGFdGih1rXL (a free BaseSpace account may be required):
+      PrimateAI_scores_v0.2.tsv.gz (for GRCh37/hg19)
+      PrimateAI_scores_v0.2_hg38.tsv.gz (for GRCh38/hg38)
+
+  Before running the plugin for the first time, the following steps must be taken to format the downloaded files:
+  1.  Unzip the scores files
+  2.  Add '#' in front of the column description line
+  3.  Remove 'chr' prefix from data lines
+  4.  Compress the file again
+  5.  Create tabix index (requires tabix to be installed).
+  Command line example:
+      $ gunzip PrimateAI_scores_v0.2.tsv.gz | sed '12s/.*/#&/' | sed s/^chr// | bgzip > PrimateAI_scores_v0.2.tsv.bgz'
+      $ tabix -s 1 -b 2 -e 2 PrimateAI_scores_v0.2.tsv.bgz'
 
 =cut
 
-Package PrimateAI
+Package PrimateAI;
 
 use strict;
 use warnings;
 
+use Bio::EnsEMBL::Utils::Sequence qw(reverse_comp);
 use Bio::EnsEMBL::Variation::Utils::BaseVepTabixPlugin;
 use base qw(Bio::EnsEMBL::Variation::Utils::BaseVepTabixPlugin);
 
@@ -47,27 +64,21 @@ sub new {
 
   my $self = $class->SUPER::new(@_);
 
-  #Check that tabix is present and correct.
-  die "Warning: tabix not found.\n"; unless `which tabix 2>$1` =~ /tabix$/;
-  
   my $file = $self->params->[0];
+  $self->add_file($file);
 
   die("ERROR: PrimateAI scores file $file not found\n") unless $file && -e $file;
 
-  #$self->expand_left(0);
-  #$self->expand_right(0);
-
-  open FILE, "$file" or die "File ($file) could not be opened. Exiting.\n";
-  while (<FILE>){
-    chomp;
-    
-    next unless $file =~ /^chr\t/;
-
-    $self->{headers} = [split];
+  #Check that the file matches the assembly
+  if ($self->{config}->{assembly} eq "GRCh37"){
+    if ($file =~ /hg38/){die "The assembly used is GRCh37, but the Primate AI file contains GRCh38/hg38 coordinates.\n";}
+  } elsif ($self->{config}->{assembly} eq "GRCh38"){
+      if ($file !~ /hg38/){die "The assembly used is GRCh38, but the Primate AI file contains GRCh37 coordinates.\n";}
   }
 
-  close FILE;
-  
+  $self->expand_left(0);
+  $self->expand_right(0);
+
   return $self;
 }
 
@@ -91,33 +102,42 @@ sub run {
   my ($self, $tva) = @_;
 
   my $vf = $tva->variation_feature;
-
   my $allele = $tva->variation_feature_seq;
-  
-  return {} unless $allele =~ /^[ACGT]+$/;
+  my $alt_aa = $tva->peptide;
 
-  my @data =  @{$self->get_data($vf->{chr}, $vf->{start}, $vf->{end})};
+  #Check the strands and complement the allele if necessary.
+  if ($vf->{strand} <0){
+    #1 indicates positive strand
+    if ($strand == 1){reverse_comp(\$allele);}
+  } elsif{
+      #0 indicates negative strand
+      if ($strand == 0){reverse_comp(\$allele);}
+  }
 
-  my $end = $vf->{end};
-  my $start = $vf->{start};
-  ($start, $end) = ($end, $start) if $start > $end;
+  return {} unless $allele =~ /^[ACGT]$/;
 
-  my $allele = $tva->variation_feature_seq;
-  reverse_comp(\$allele) if $vf->{strand} < 0;
+  #Get the start and end coordinates, and ensure they are the right way round (i.e. start < end).
+  my $vf_start = $vf->{start};
+  my $vf_end = $vf->{end};
+  ($vf_start, $vf_end) = ($vf_end, $vf_start) if $vf_start > $vf_end;
 
+#Compare the postion, allele and alt amino acid
   my ($res) = grep {
-    $_->{chr} eq $vf->{chr} &&
-    $_->{pos} eq $vf->{start} &&
-    $_->{pos} eq $vf->{end} &&
-    $_->{alt} eq $allele
-  } @{$self->get_data($vf->{chr}, $vf->{start}, $vf->{end})};
+    $_->{pos} eq $vf_start &&
+    $_->{pos} eq $vf_end &&
+    $_->{alt} eq $allele &&
+    $_->{altAA} eq $alt_aa
+  } @{$self->get_data($vf->{chr}, $vf_start, $vf_end)};
 
-  return {} unless(@data);
+  #Return data if matched
+  return $res ? $res->{result} : {};
 }
 
 sub parse_data {
   my ($self, $line) = @_;
-  my ($chr, $pos, $ref, $alt, $refAA, $altAA, $strand, $trinuc, $gene, $cov, $score) = split /\t/, $line;
+
+  #Columns in order of the input file.
+  my ($chr, $pos, $ref, $alt, $refAA, $altAA, $strand, $trinuc, $gene, $cov, $score) = split(/\t/, $line);
 
   return {
     ref => $chr,
@@ -125,12 +145,15 @@ sub parse_data {
     start => $pos,
     end => $pos,
     result => {
+      #Score to be returned
       PrimateAI   => $score,
+
+      #Are any other features useful to return?
     }
   };
 }
 
-sub get_start {  
+sub get_start {
   return $_[1]->{'pos'};
 }
 
@@ -138,7 +161,4 @@ sub get_end {
   return $_[1]->{'pos'};
 }
 
-
-
-
-
+1;

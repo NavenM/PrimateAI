@@ -48,7 +48,7 @@ limitations under the License.
   7.  Create tabix index (requires tabix to be installed).
   Command line example:
       $ gunzip PrimateAI_scores_v0.2.tsv.gz | sed '12s/.*/#&/' | sed s/^chr// | sed '/^$/d | | awk 'NR<13{print $0;next}{print $0 | "sort -k1,1 -k 2,2n -V"}' | bgzip > PrimateAI_scores_v0.2_GRCh37_sorted.tsv.bgz
-      $ tabix -s 1 -b 2 -e 2 PrimateAI_scores_v0.2_sorted.tsv.bgz
+      $ tabix -s 1 -b 2 -e 2 PrimateAI_scores_v0.2_GRCh37_sorted.tsv.bgz
 
 =cut
 
